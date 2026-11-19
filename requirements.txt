@@ -1,0 +1,23 @@
+# Satellite data search and loading
+pystac-client
+odc-stac
+# Raster / array handling
+numpy
+pandas
+xarray
+rioxarray
+rasterio
+scipy
+dask
+h5netcdf               # NetCDF cache files
+h5py
+# Vector output (kill-zone polygons)
+geopandas
+shapely
+pyproj
+# Config, downloads, plotting, report
+pyyaml
+requests
+matplotlib
+markdown
+fpdf2

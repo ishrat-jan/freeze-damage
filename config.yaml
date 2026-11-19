@@ -1,0 +1,163 @@
+# Freeze damage assessment - Lake County (Clermont), Sentinel-2
+# Every setting the pipeline uses lives here. Code must not hard-code these values.
+
+run:
+  resolution_m: 10          # full run (Kaggle)
+  test_resolution_m: 60     # used with: python run_pipeline.py --test
+  crs: "EPSG:32617"         # UTM 17N, native CRS of tile 17RMM
+  data_dir: "data/cache"    # downloads and intermediate files (one subfolder per resolution)
+  output_dir: "outputs"     # results (one subfolder per resolution)
+
+aoi:
+  bbox: [-81.95, 28.40, -81.60, 28.85]   # lon/lat: west, south, east, north
+
+sentinel2:
+  stac_url: "https://earth-search.aws.element84.com/v1"
+  collection: "sentinel-2-l2a"
+  mgrs_tile: "MGRS-17RMM"
+  start_date: "2026-01-04"
+  end_date: "2026-02-23"
+  bands: ["red", "green", "blue", "nir", "scl"]
+  scale: 10000                    # reflectance = DN / scale (offset already applied)
+  offset_flag: "earthsearch:boa_offset_applied"
+  boa_offset: -1000               # added to DN when the data contain the offset
+  # The flag above is unreliable (wrong for several 2025 scenes), so the offset is
+  # detected from the data: offset present if fewer than this share of clear-land
+  # red DNs are below 1000 (with an offset, DN < 1000 would be negative reflectance).
+  offset_check_max_below: 0.01
+  clear_scl_classes: [4, 5]       # 4 = vegetation, 5 = bare soil
+  water_scl_class: 6
+  water_reference_date: "2026-02-06"   # cloud-free date used for the water mask
+  scl_report_groups:              # only used in the clear-fraction table
+    cloud: [3, 8, 9]              # cloud shadow, medium and high probability cloud
+    cirrus: [10]
+    water: [6]
+  chunk_size: 2048                # dask chunk size in pixels
+  # How pixels are resampled to the target grid (matters most in 60 m test mode)
+  resampling_reflectance: "average"
+  resampling_scl: "nearest"       # class codes must never be averaged
+  cache_file: "s2_dn.nc"          # raw digital numbers, cached so reruns skip download
+
+dates:
+  # Labels are the dates we use; each must match one acquisition (solar day)
+  # Baseline = per-pixel median of these dates (each cloud-masked). 4 and 7 Jan are
+  # mostly cloudy but add clear pixels where the later dates are cirrus-flagged.
+  baseline: ["2026-01-04", "2026-01-07", "2026-01-17", "2026-01-22", "2026-01-27"]
+  damage_early: "2026-02-06"
+  damage_late: "2026-02-21"
+  noise_pair: ["2026-01-17", "2026-01-27"]   # [earlier, later]; both before the main freeze
+  clear_not_used: ["2026-02-01"]   # clear, but during the freeze peak (not a damage date)
+  cloudy: ["2026-01-12", "2026-02-11", "2026-02-16"]
+
+baseline_sensitivity:
+  # Same damage classification with different baseline dates, to see how much the
+  # citrus damage % depends on the choice of baseline. Reported for citrus on both damage dates.
+  # The +/- uncertainty quoted in the report = largest damage-% difference to the first
+  # variant (on shared pixels) among variants that assess at least this share of its citrus
+  # (very sparse variants such as C are left out: they describe a different set of pixels).
+  uncertainty_min_share: 0.5
+  variants:
+    A: {label: "all five dates, current", dates: ["2026-01-04", "2026-01-07", "2026-01-17", "2026-01-22", "2026-01-27"]}
+    B: {label: "without 27 Jan, morning after first freeze night", dates: ["2026-01-04", "2026-01-07", "2026-01-17", "2026-01-22"]}
+    C: {label: "4 and 7 Jan only, before 16 Jan cold", dates: ["2026-01-04", "2026-01-07"]}
+
+thresholds:
+  vegetation_ndvi: 0.3        # baseline NDVI >= this = vegetated
+  # NDVI change (date - baseline). Damage classes:
+  #   0 none     change >= mild
+  #   1 mild     moderate <= change < mild
+  #   2 moderate severe   <= change < moderate
+  #   3 severe   change < severe
+  mild: -0.10
+  moderate: -0.20
+  severe: -0.30
+  # Recovery (21 Feb vs 6 Feb) for pixels damaged on 6 Feb.
+  # Changes smaller than this tolerance count as "same".
+  recovery_tolerance: 0.05
+
+kill_zones:
+  late_min_class: 2           # moderate or worse on the late date ...
+  early_min_class: 1          # ... AND mild or worse on the early date
+  min_area_ha: 0.1            # drop patches smaller than this
+  connectivity: 8             # pixel neighbourhood for joining patches (4 or 8)
+
+citrus:
+  cdl_year: 2025
+  cdl_class: 72               # USDA CDL "Citrus"
+  cdl_crs: "EPSG:5070"        # CONUS Albers, the CropScape API's CRS
+  api_url: "https://nassgeodata.gmu.edu/axis2/services/CDLService/GetCDLFile"
+  timeout_s: 120
+  retries: 5
+  retry_wait_s: 10
+
+seasonal_check:
+  # Control vegetation (CDL classes) compared with citrus. The controls also
+  # experienced the freeze, so they are NOT subtracted from citrus; they only
+  # show whether citrus reacted more strongly than other vegetation.
+  controls:
+    evergreen forest: [142]   # pines etc., fairly freeze-hardy
+  # "other vegetation" (all vegetated non-citrus pixels) is always added
+
+prior_year:
+  # Same NDVI change computed one year earlier (same AOI, masks, thresholds,
+  # citrus mask) to show how much change is normal for this time of year.
+  label: "2025"
+  start_date: "2025-01-01"
+  end_date: "2025-02-28"
+  # Dates mirror the 2026 setup (same days of year where possible).
+  # 22 Jan 2025 is skipped: 100% cloud.
+  baseline: ["2025-01-02", "2025-01-12", "2025-01-17", "2025-01-27"]
+  damage_early: "2025-02-06"
+  damage_late: "2025-02-21"
+  cache_file: "s2_dn_2025.nc"
+
+terrain:
+  dem_collection: "cop-dem-glo-30"
+  # MAIN RESULT: low-lying index = DEM minus mean DEM within this radius.
+  # Negative = lower than the surroundings (cold air pools there).
+  lowlying_radius_m: 300
+  # Frost-prone classes from the low-lying index (metres):
+  #   hollow:      deep_hollow_m <= index < hollow_m
+  #   deep hollow: index < deep_hollow_m
+  hollow_m: 0.0      # any ground below its surroundings (damage rate jumps here, see damage_by_lowlying.csv)
+  deep_hollow_m: -4.0
+  # Index bins for the damage-rate table (metres); open-ended at both ends
+  lowlying_bins: [-4, -2, 0, 2]
+  # SUPPLEMENTARY: damage rate per elevation band (table + chart only, no map layer)
+  elevation_band_m: 5
+  min_band_pixels: 20         # ignore bands with fewer citrus pixels (too noisy)
+  # Damage date used for frost-prone analysis: "early" (6 Feb) is closest to the
+  # freeze; "late" (21 Feb) includes delayed leaf drop.
+  damage_date: "early"
+  cache_file: "dem.nc"
+
+maps:
+  max_pixels: 1500            # downsample longer side to this for PNGs
+  dpi: 150
+  rgb_date: "2026-02-06"      # true-colour background (cloud-free)
+  rgb_stretch_pct: [2, 98]    # contrast stretch percentiles
+  change_limit: 0.4           # NDVI change colour scale: -limit .. +limit
+  label_top_zones: 10         # label the N largest kill zones on the map
+  zoom_window_km: 4           # size of the close-up map around the largest kill zone
+  # Colours (checked for colour-blind safety with the dataviz validator)
+  colors:
+    background_land: "#e3e2de"
+    surface: "#fcfcfb"
+    text: "#0b0b0b"
+    text_muted: "#52514e"
+    change_loss: "#d03b3b"     # diverging: red = NDVI loss
+    change_mid: "#f0efec"      #            grey = no change
+    change_gain: "#2a78d6"     #            blue = NDVI gain
+    damage: ["#ef8a62", "#cc4c3b", "#8b1a1a"]          # mild, moderate, severe
+    recovery: ["#1c5cab", "#6da7ec", "#e34948", "#eda100"]  # recovered, partly, same/worse, new
+    frost: ["#86b6ef", "#1c5cab"]                      # hollow, deep hollow
+    baseline_count: ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]  # 1..5 dates
+    baseline_none: "#eda100"   # pixels with no clear baseline date
+    kill_zone: "#d03b3b"
+    citrus_ok: "#9fbf8f"       # undamaged citrus (muted green, behind damage colours)
+    series: ["#2a78d6", "#eb6834", "#1baf7a"]          # chart groups, fixed order
+
+report:
+  title: "Freeze Damage Assessment - Lake County (Clermont), Jan-Feb 2026"
+  top_zones_in_report: 10
+  pdf_image_width_mm: 150

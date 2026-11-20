@@ -21,7 +21,7 @@ import time
 import numpy as np
 import pandas as pd
 import xarray as xr
-from odc.stac import load as stac_load
+from odc.stac import configure_rio, load as stac_load
 from pystac_client import Client
 
 
@@ -109,6 +109,32 @@ def scene_inventory(items, cfg):
     return df
 
 
+def configure_downloads(cfg):
+    """Make GDAL (which reads the Sentinel-2 files over the web) retry failed reads itself."""
+    s2 = cfg["sentinel2"]
+    configure_rio(cloud_defaults=True,
+                  GDAL_HTTP_MAX_RETRY=str(s2["gdal_http_retries"]),
+                  GDAL_HTTP_RETRY_DELAY=str(s2["gdal_http_retry_delay_s"]))
+
+
+def clear_gdal_web_cache():
+    """Forget what GDAL remembers about files read over the web.
+
+    After a read fails, GDAL can keep the broken result in its cache, so retries in
+    the same program fail again ("not recognized as being in a supported file format").
+    rasterio has no Python function for this, so we call GDAL's C function directly.
+    Best effort: if it is not possible on this system, nothing happens.
+    """
+    import ctypes
+    try:
+        libs = [l.split()[-1] for l in open("/proc/self/maps") if "libgdal" in l]
+        lib = ctypes.CDLL(libs[0])
+        lib.VSICurlClearCache.restype = None
+        lib.VSICurlClearCache()
+    except Exception:
+        pass
+
+
 def bands_for_date(day, cfg):
     """Bands to download for one date. Green and blue are only needed for the
     true-colour map, so they are downloaded for maps.rgb_date only (saves ~40%)."""
@@ -162,6 +188,7 @@ def load_dn_date(cfg, items, day, cache_dir):
             print(f"  download of {day} failed (try {attempt}/{tries}): {str(e).splitlines()[-1][:150]}", flush=True)
             print(f"  waiting {wait} s, then trying again ...", flush=True)
             time.sleep(wait)
+            clear_gdal_web_cache()
             wait *= 2
     # Use plain dates (YYYY-MM-DD) as the time labels, matching config.yaml.
     ds = ds.assign_coords(time=pd.to_datetime(ds.time.values).normalize())

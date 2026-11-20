@@ -35,6 +35,8 @@ sentinel2:
   chunk_size: 2048                # dask chunk size in pixels
   download_retries: 5             # tries per date if the connection drops (slow/unstable internet)
   download_retry_wait_s: 30       # wait between tries (doubles each time)
+  gdal_http_retries: 5            # GDAL itself retries a failed web read this many times ...
+  gdal_http_retry_delay_s: 10     # ... waiting this long between tries
   # How pixels are resampled to the target grid (matters most in 60 m test mode)
   resampling_reflectance: "average"
   resampling_scl: "nearest"       # class codes must never be averaged

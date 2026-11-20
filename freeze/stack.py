@@ -20,6 +20,7 @@ from freeze import masks, ndvi, sentinel
 def load_series(cfg, items, cache_dir, keep_dates, rgb_date=None, water_date=None, table_name=None):
     """Return dict: ndvi (time, y, x float32 for keep_dates), clear_tab, rgb, water."""
     cache_dir.mkdir(parents=True, exist_ok=True)
+    sentinel.configure_downloads(cfg)
     days = sorted({sentinel._day(it) for it in items})
     keep = set(keep_dates)
     nd_list, rows, rgb, water = [], [], None, None

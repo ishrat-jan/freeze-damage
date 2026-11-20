@@ -39,7 +39,10 @@ def load_dem(template, cfg):
                                bbox=cfg["aoi"]["bbox"]).items())
     print(f"  downloading DEM ({len(items)} tiles) ...")
     # DEM files are s3:// links to a public bucket: read them without AWS credentials.
-    configure_rio(cloud_defaults=True, aws={"aws_unsigned": True})
+    s2 = cfg["sentinel2"]   # same web-read retry settings as for Sentinel-2
+    configure_rio(cloud_defaults=True, aws={"aws_unsigned": True},
+                  GDAL_HTTP_MAX_RETRY=str(s2["gdal_http_retries"]),
+                  GDAL_HTTP_RETRY_DELAY=str(s2["gdal_http_retry_delay_s"]))
     ds = stac_load(items, bands=["data"], geobox=template.odc.geobox, resampling="bilinear")
     dem = ds["data"].squeeze("time", drop=True).astype("float32").rename("elevation")
     tmp = cache.with_suffix(".tmp")

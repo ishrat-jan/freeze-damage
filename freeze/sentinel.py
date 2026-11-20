@@ -3,7 +3,8 @@
 Steps:
 1. search_scenes(): list all scenes for tile 17RMM in a date window.
 2. scene_inventory(): one row per date (cloud %, our clear/cloudy label) -> CSV.
-3. load_dn(): download the bands for the AOI on our grid (cached as NetCDF).
+3. load_dn_date(): download the bands of one date for the AOI on our grid
+   (cached as one NetCDF file per date).
 4. to_reflectance(): DN -> surface reflectance.
 
 BOA offset: since processing baseline 04.00, L2A digital numbers can carry a
@@ -15,6 +16,8 @@ reflectance). So we decide from the data, per date:
     offset absent   -> DN / 10000
 The flag is still recorded, and a warning is printed when data and flag disagree.
 """
+import time
+
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -106,49 +109,69 @@ def scene_inventory(items, cfg):
     return df
 
 
-def load_dn(cfg, items=None, cache_file=None):
-    """Load raw digital numbers for all dates on the analysis grid.
+def bands_for_date(day, cfg):
+    """Bands to download for one date. Green and blue are only needed for the
+    true-colour map, so they are downloaded for maps.rgb_date only (saves ~40%)."""
+    s2 = cfg["sentinel2"]
+    rgb_only = s2["rgb_only_bands"]
+    if day == cfg["maps"]["rgb_date"]:
+        return list(s2["bands"])
+    return [b for b in s2["bands"] if b not in rgb_only]
 
-    The result is saved as compressed NetCDF in the cache folder; if that file
-    exists it is reused, so the (slow) download happens only once per resolution.
-    The Earth Search offset flag of each date is stored with it (coordinate "boa_flag").
+
+def load_dn_date(cfg, items, day, cache_dir):
+    """Raw digital numbers for ONE date on the analysis grid (time dimension of length 1).
+
+    Each date is cached as its own NetCDF file (cache_dir/YYYY-MM-DD.nc), so:
+      - only one date is in memory at a time (important at 10 m), and
+      - an interrupted download resumes from the next missing date.
+    The Earth Search offset flag of the date is stored with it (coordinate "boa_flag").
     """
     s2 = cfg["sentinel2"]
-    cache = cfg["run"]["cache"] / (cache_file or s2["cache_file"])
+    bands = bands_for_date(day, cfg)
+    cache = cache_dir / f"{day}.nc"
     if cache.exists():
-        print(f"  using cached Sentinel-2 data: {cache}")
-        return xr.open_dataset(cache, engine="h5netcdf", decode_coords="all").load()
+        ds = xr.open_dataset(cache, engine="h5netcdf", decode_coords="all")
+        if all(b in ds for b in bands):           # cached file has every band we need
+            return ds[bands].load()
+        ds.close()                                 # e.g. rgb_date changed: download again
 
-    if items is None:
-        items = search_scenes(cfg)
-    resampling = {b: s2["resampling_reflectance"] for b in s2["bands"]}
+    day_items = [it for it in items if _day(it) == day]
+    resampling = {b: s2["resampling_reflectance"] for b in bands}
     resampling["scl"] = s2["resampling_scl"]
-
-    ds = stac_load(
-        items,
-        bands=s2["bands"],
-        bbox=cfg["aoi"]["bbox"],
-        crs=cfg["run"]["crs"],
-        resolution=cfg["run"]["res"],
-        groupby="solar_day",          # merge tiles/duplicates from the same day
-        chunks={"x": s2["chunk_size"], "y": s2["chunk_size"]},
-        resampling=resampling,
-        fail_on_error=True,
-    )
-    print(f"  downloading {len(ds.time)} dates, grid {ds.sizes['y']} x {ds.sizes['x']} pixels ...")
-    ds = ds.compute()
+    tries, wait = s2["download_retries"], s2["download_retry_wait_s"]
+    for attempt in range(1, tries + 1):
+        try:
+            ds = stac_load(
+                day_items,
+                bands=bands,
+                bbox=cfg["aoi"]["bbox"],
+                crs=cfg["run"]["crs"],
+                resolution=cfg["run"]["res"],
+                groupby="solar_day",          # merge tiles/duplicates from the same day
+                chunks={"x": s2["chunk_size"], "y": s2["chunk_size"]},
+                resampling=resampling,
+                fail_on_error=True,
+            )
+            print(f"  downloading {day} ({', '.join(bands)}), grid {ds.sizes['y']} x {ds.sizes['x']} ...", flush=True)
+            ds = ds.compute()
+            break
+        except Exception as e:                # network drop / timeout: wait and try this date again
+            if attempt == tries:
+                raise
+            print(f"  download of {day} failed (try {attempt}/{tries}): {str(e).splitlines()[-1][:150]}", flush=True)
+            print(f"  waiting {wait} s, then trying again ...", flush=True)
+            time.sleep(wait)
+            wait *= 2
     # Use plain dates (YYYY-MM-DD) as the time labels, matching config.yaml.
     ds = ds.assign_coords(time=pd.to_datetime(ds.time.values).normalize())
-    flags = flags_by_date(items, cfg)
-    days = pd.to_datetime(ds.time.values).strftime("%Y-%m-%d")
-    ds = ds.assign_coords(boa_flag=("time", np.array([flags[d] for d in days])))
+    ds = ds.assign_coords(boa_flag=("time", np.array([flags_by_date(day_items, cfg)[day]])))
 
-    encoding = {b: {"zlib": True, "complevel": 4} for b in s2["bands"]}
+    encoding = {b: {"zlib": True, "complevel": 4} for b in bands}
     # Write to a temp file first, so a failed save never leaves a broken cache.
     tmp = cache.with_suffix(".tmp")
     ds.to_netcdf(tmp, engine="h5netcdf", encoding=encoding)
     tmp.rename(cache)
-    print(f"  saved cache: {cache}")
     return ds
 
 
@@ -158,7 +181,7 @@ def to_reflectance(ds, cfg):
     offset = xr.DataArray(detect_offsets(ds, cfg).astype("float32"), dims="time")   # 0 or -1000
     out = xr.Dataset(coords=ds.coords, attrs=ds.attrs)
     out = out.assign_coords(boa_offset=offset)
-    for b in s2["bands"]:
+    for b in [b for b in s2["bands"] if b in ds]:      # green/blue exist only on the RGB date
         if b == "scl":
             out[b] = ds[b]
         else:

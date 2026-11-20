@@ -1,11 +1,11 @@
 """Prior-year (2025) NDVI change, computed exactly like 2026.
 
 Loads the prior-year scenes listed in config.yaml (only those dates, to keep
-the download small), on the same grid, then applies the same cloud mask,
+the download small), one date at a time (freeze/stack.py), on the same grid, then applies the same cloud mask,
 baseline median, vegetation threshold and damage thresholds. The 2025 citrus
 mask is the same CDL layer as for 2026.
 """
-from freeze import damage, masks, ndvi, seasonal, sentinel
+from freeze import damage, masks, ndvi, seasonal, sentinel, stack
 
 
 def run_prior_year(cfg, cit, cdl):
@@ -13,12 +13,9 @@ def run_prior_year(cfg, cit, cdl):
     p = cfg["prior_year"]
     dates = p["baseline"] + [p["damage_early"], p["damage_late"]]
     items = sentinel.search_scenes(cfg, p["start_date"], p["end_date"], dates=dates)
-    refl = sentinel.to_reflectance(sentinel.load_dn(cfg, items, cache_file=p["cache_file"]), cfg)
-
-    clear = masks.clear_mask(refl, cfg)
-    clear_tab = masks.clear_fraction_table(refl, clear, cfg, save=False)
-    clear_tab.to_csv(cfg["run"]["out"] / "tables" / f"clear_fraction_by_date_{p['label']}.csv", index=False)
-    nd = ndvi.compute_ndvi(refl, clear)
+    series = stack.load_series(cfg, items, cfg["run"]["cache"] / p["cache_dir"], dates,
+                               table_name=f"clear_fraction_by_date_{p['label']}.csv")
+    nd, clear_tab = series["ndvi"], series["clear_tab"]
     base, count = ndvi.baseline(nd, p["baseline"])
     veg = masks.vegetation_mask(base, cfg)
 

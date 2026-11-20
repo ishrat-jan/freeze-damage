@@ -33,10 +33,13 @@ sentinel2:
     cirrus: [10]
     water: [6]
   chunk_size: 2048                # dask chunk size in pixels
+  download_retries: 5             # tries per date if the connection drops (slow/unstable internet)
+  download_retry_wait_s: 30       # wait between tries (doubles each time)
   # How pixels are resampled to the target grid (matters most in 60 m test mode)
   resampling_reflectance: "average"
   resampling_scl: "nearest"       # class codes must never be averaged
-  cache_file: "s2_dn.nc"          # raw digital numbers, cached so reruns skip download
+  cache_dir: "s2_dn"              # raw digital numbers, one NetCDF per date, so reruns skip download
+  rgb_only_bands: ["green", "blue"]   # only downloaded for maps.rgb_date (true-colour map)
 
 dates:
   # Labels are the dates we use; each must match one acquisition (solar day)
@@ -109,7 +112,7 @@ prior_year:
   baseline: ["2025-01-02", "2025-01-12", "2025-01-17", "2025-01-27"]
   damage_early: "2025-02-06"
   damage_late: "2025-02-21"
-  cache_file: "s2_dn_2025.nc"
+  cache_dir: "s2_dn_2025"
 
 terrain:
   dem_collection: "cop-dem-glo-30"

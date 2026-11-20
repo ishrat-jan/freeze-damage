@@ -18,19 +18,19 @@ It supports three goals from the brief:
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python run_pipeline.py --test   # 60 m quick run (~65 MB download incl. 2025, ~2-3 min)
-python run_pipeline.py          # full 10 m run (~1-2 GB download; use Kaggle)
+python run_pipeline.py --test   # 60 m quick run (~65 MB download incl. 2025, ~1 min)
+nohup python -u run_pipeline.py > run_10m.log 2>&1 &   # full 10 m run in the background
+tail -f run_10m.log                                    # watch progress (Ctrl+C stops watching only)
 ```
 
 Results go to `outputs/<resolution>m/`, so a test run never overwrites the
-10 m results. Downloads are cached in `data/cache/`, so a second run skips them.
+10 m results. Downloads are cached in `data/cache/<resolution>m/`, one file per
+date, so a second run (or a run restarted after a dropped connection) skips the
+dates already downloaded.
 
-### On Kaggle
-
-1. Create a notebook with Internet enabled and upload/clone this repository.
-2. `!pip install -r requirements.txt`
-3. `!python run_pipeline.py`
-4. Download `outputs/10m/` (or save it as a Kaggle dataset).
+**Memory:** dates are loaded and processed one at a time (`freeze/stack.py`),
+and green/blue are downloaded only for the true-colour map date. The full 10 m run
+needs about 4 GB of RAM and downloads about 1-1.5 GB. Each step in the log shows the peak RAM so far.
 
 ## Configuration
 
@@ -42,7 +42,8 @@ Every setting (AOI, dates, thresholds, URLs, colours, paths) is in
 | Step | Module | What it does |
 |---|---|---|
 | 1 | `freeze/config.py` | Load `config.yaml`, apply test mode, create folders |
-| 2 | `freeze/sentinel.py` | STAC search (Earth Search), scene inventory, load bands with odc-stac (cached), BOA offset detected per scene from the data |
+| 2 | `freeze/sentinel.py` | STAC search (Earth Search), scene inventory, load one date with odc-stac (cached per date), BOA offset detected per scene from the data |
+| 2b | `freeze/stack.py` | Memory-safe loop over dates: reflectance, clear mask, clear-fraction row, NDVI kept only for dates used later |
 | 3 | `freeze/masks.py` | Clear-pixel mask (SCL 4/5, nir+red > 0), water mask, vegetation mask, clear-fraction table |
 | 4 | `freeze/ndvi.py` | NDVI, baseline median (4/7/17/22/27 Jan, each cloud-masked), noise check, change maps |
 | 5 | `freeze/damage.py` | Damage classes (none/mild/moderate/severe) and recovery classes |

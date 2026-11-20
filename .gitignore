@@ -7,3 +7,4 @@ __pycache__/
 # Private notes, kept locally only
 brief.md
 CLAUDE.md
+*.log

@@ -6,18 +6,34 @@
 All settings are in config.yaml. Results go to outputs/<resolution>m/.
 """
 import argparse
+import gc
+import os
+import sys
+import traceback
 import time
 import warnings
 
 from freeze import (citrus, damage, maps, masks, ndvi, prior_year, report, seasonal, sensitivity, sentinel,
-                    tables, terrain, zones)
+                    stack, tables, terrain, zones)
 from freeze.config import load_config
 from freeze.damage import DAMAGE_NAMES, NODATA, RECOVERY_NAMES
 from freeze.io_utils import save_geotiff
 
 
+def memory_gb():
+    """Peak memory (RAM) used so far by this process, in GB (Linux/macOS; None elsewhere)."""
+    try:
+        import resource
+        kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return kb / 1024**2 if sys.platform != "darwin" else kb / 1024**3   # macOS reports bytes
+    except ImportError:
+        return None
+
+
 def step(msg):
-    print(f"\n[{time.strftime('%H:%M:%S')}] {msg}")
+    mem = memory_gb()
+    mem_txt = f"  (peak RAM so far {mem:.1f} GB)" if mem is not None else ""
+    print(f"\n[{time.strftime('%H:%M:%S')}] {msg}{mem_txt}", flush=True)
 
 
 def main(config_path="config.yaml", test=False):
@@ -31,14 +47,13 @@ def main(config_path="config.yaml", test=False):
     inventory = sentinel.scene_inventory(items, cfg)
     print(f"  {len(inventory)} dates found")
 
-    step("2. Load bands (cached after first run)")
-    refl = sentinel.to_reflectance(sentinel.load_dn(cfg, items), cfg)
-
-    step("3. Cloud masks and NDVI")
-    clear = masks.clear_mask(refl, cfg)
-    clear_tab = masks.clear_fraction_table(refl, clear, cfg)
-    water = masks.water_mask(refl, cfg)
-    nd = ndvi.compute_ndvi(refl, clear)
+    step("2-3. Load bands date by date (cached), cloud masks and NDVI")
+    series = stack.load_series(cfg, items, cfg["run"]["cache"] / cfg["sentinel2"]["cache_dir"],
+                               stack.needed_dates(cfg), rgb_date=cfg["maps"]["rgb_date"],
+                               water_date=cfg["sentinel2"]["water_reference_date"],
+                               table_name="clear_fraction_by_date.csv")
+    nd, clear_tab, rgb, water = series["ndvi"], series["clear_tab"], series["rgb"], series["water"]
+    del series
 
     step("4. Baseline, vegetation mask, noise check")
     base, base_count = ndvi.baseline(nd, d["baseline"])
@@ -71,6 +86,8 @@ def main(config_path="config.yaml", test=False):
     step("8b. Baseline sensitivity (A/B/C baseline dates)")
     sens = sensitivity.baseline_sensitivity(nd, cit, cfg)
     print(sens[["variant", "date", "assessed_ha", "damaged_pct", "shared_ha", "shared_damaged_pct"]].to_string(index=False))
+    del nd                         # the NDVI time series is not needed after this point
+    gc.collect()
 
     step("9. Frost-prone areas (DEM)")
     dem = terrain.load_dem(base, cfg)
@@ -100,7 +117,7 @@ def main(config_path="config.yaml", test=False):
     step("12. Maps")
     c, lim = cfg["maps"]["colors"], cfg["maps"]["change_limit"]
     land = ~water
-    maps.rgb_map(refl, cfg["maps"]["rgb_date"], cfg)
+    maps.rgb_map(rgb, cfg["maps"]["rgb_date"], cfg)
     base_days = ", ".join(x[5:] for x in d["baseline"])
     maps.continuous_map(base, "ndvi_baseline", f"Baseline NDVI (median of {base_days})", "NDVI", cfg,
                         cmap="Greens", vmin=0, vmax=1)
@@ -123,7 +140,7 @@ def main(config_path="config.yaml", test=False):
     maps.class_map(recovery.where(cit, NODATA), rec_labels, c["recovery"], "recovery_citrus",
                    f"Citrus recovery: {late} vs {early} (grey = other land)", cfg, land=land,
                    legend_title="recovery", zero=("undamaged", c["citrus_ok"]))
-    maps.kill_zone_map(refl, kz, cfg)
+    maps.kill_zone_map(rgb, kz, cfg)
     damages[late].attrs["date"] = late
     maps.kill_zone_zoom(damages[late], cit, kz, land, cfg)
     t = cfg["terrain"]
@@ -141,7 +158,7 @@ def main(config_path="config.yaml", test=False):
     md_path, pdf_path = report.write_report(results, cfg)
     print(f"  {md_path}\n  {pdf_path}")
 
-    print(f"\nDone. Results in {out}")
+    print(f"\nDone. Results in {out}  (peak RAM {memory_gb() or float('nan'):.1f} GB)")
     return results
 
 
@@ -151,4 +168,12 @@ if __name__ == "__main__":
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--test", action="store_true", help="coarse 60 m run for quick testing")
     a = p.parse_args()
-    main(a.config, test=a.test)
+    try:
+        main(a.config, test=a.test)
+    except Exception:
+        # Print the error and exit at once: after a failed download, background
+        # download threads can otherwise keep the program hanging instead of exiting.
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
